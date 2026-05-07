@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>X/Twitter to Markdown</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <h1>X/Twitter to Markdown</h1>
+          <p id="status">打开 X/Twitter 页面后导出当前可见内容。</p>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Export controls">
+        <label class="select-label">
+          <span>范围</span>
+          <select id="mode">
+            <option value="current">当前推文</option>
+            <option value="visible" selected>页面可见推文/线程</option>
+          </select>
+        </label>
+        <button id="refresh" type="button">生成</button>
+      </section>
+
+      <textarea id="output" spellcheck="false" placeholder="Markdown 会显示在这里"></textarea>
+
+      <footer>
+        <button id="copy" type="button">复制完整 Markdown</button>
+        <button id="downloadMd" type="button">下载完整 .md</button>
+        <button id="download" type="button">下载离线包</button>
+      </footer>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
