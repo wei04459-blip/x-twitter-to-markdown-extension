@@ -18,7 +18,7 @@ body {
 
 .shell {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
   min-height: 560px;
   gap: 12px;
   padding: 16px;
@@ -58,6 +58,30 @@ footer {
   gap: 4px;
   color: #4b5563;
   font-size: 12px;
+}
+
+.directory-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.directory-control div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.directory-control strong {
+  overflow: hidden;
+  color: #172033;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 select,
@@ -125,8 +149,13 @@ footer button {
   }
 
   p,
-  .select-label {
+  .select-label,
+  .directory-control {
     color: #a7b0bc;
+  }
+
+  .directory-control strong {
+    color: #f3f4f6;
   }
 
   select,

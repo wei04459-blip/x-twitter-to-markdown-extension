@@ -191,21 +191,108 @@
   function looksLikeUiTitle(text) {
     return (
       !text ||
-      ["对话", "文章", "主页", "搜索", "通知", "更多", "个人资料", "X", "Twitter"].includes(text) ||
+      ["\u5bf9\u8bdd", "\u6587\u7ae0", "\u4e3b\u9875", "\u641c\u7d22", "\u901a\u77e5", "\u66f4\u591a", "\u4e2a\u4eba\u8d44\u6599", "X", "Twitter"].includes(text) ||
+      ["Conversation", "Articles", "Article", "Home", "Search", "Notifications", "More", "Profile"].includes(text) ||
       /^@\w+$/.test(text) ||
       /^https?:\/\//i.test(text)
     );
   }
 
-  function getArticleTitle(root, textBlocks = []) {
-    const headingCandidates = [...root.querySelectorAll('[role="heading"], h1, h2')]
-      .filter(isVisible)
-      .map((node) => cleanText(node.innerText || node.textContent || ""))
-      .filter((text) => !looksLikeUiTitle(text));
+  function normalizeTitleText(value) {
+    return cleanText(value)
+      .replace(/\s+/g, " ")
+      .replace(/^["“”'‘’]+|["“”'‘’]+$/g, "")
+      .trim();
+  }
 
-    const firstTextBlock = textBlocks.find((block) => block.text.length >= 8 && !looksLikeUiTitle(block.text));
-    const pageTitle = cleanText(document.title.replace(/\s*\/\s*X$/, ""));
-    return headingCandidates[0] || firstTextBlock?.text || pageTitle;
+  function getDocumentTitleCandidate() {
+    const title = normalizeTitleText(document.title)
+      .replace(/^.+?\s+on\s+X\s*:\s*["“]?(.+?)["”]?\s*$/i, "$1")
+      .replace(/\s*(?:\/|\||-)\s*(?:X|Twitter)\s*$/i, "")
+      .trim();
+    return looksLikeUiTitle(title) ? "" : title;
+  }
+
+  function getAuthorTitleRejects(root) {
+    const userName = root.querySelector('[data-testid="User-Name"]');
+    return cleanText(userName?.innerText || "")
+      .split("\n")
+      .map(normalizeTitleText)
+      .filter(Boolean);
+  }
+
+  function isLikelyArticleTitle(text, rejects = []) {
+    const value = normalizeTitleText(text);
+    if (looksLikeUiTitle(value)) return false;
+    if (value.length < 4 || value.length > 180) return false;
+    if (/^[-•*]\s*/.test(value)) return false;
+    if (/^(http|www\.)/i.test(value)) return false;
+    if (/^\d+[\d.,\s]*(views?|likes?|reposts?|replies?)?$/i.test(value)) return false;
+    if (rejects.some((item) => item === value)) return false;
+    return true;
+  }
+
+  function sameTitle(a, b) {
+    return normalizeTitleText(a).toLowerCase() === normalizeTitleText(b).toLowerCase();
+  }
+
+  function getArticleTitle(root, textBlocks = []) {
+    const rootTop = root.getBoundingClientRect().top + scrollY;
+    const documentTitle = getDocumentTitleCandidate();
+    const authorRejects = getAuthorTitleRejects(root);
+    const candidates = [];
+
+    [...root.querySelectorAll('[role="heading"], h1, h2')]
+      .filter(isVisible)
+      .forEach((node) => {
+        const text = normalizeTitleText(node.innerText || node.textContent || "");
+        if (!isLikelyArticleTitle(text, authorRejects)) return;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        candidates.push({
+          text,
+          source: "heading",
+          top: rect.top + scrollY,
+          fontSize: Number.parseFloat(style.fontSize) || 0
+        });
+      });
+
+    textBlocks.slice(0, 8).forEach((block, index) => {
+      const text = normalizeTitleText(block.text);
+      if (!isLikelyArticleTitle(text, authorRejects)) return;
+      candidates.push({
+        text,
+        source: "text",
+        top: block.top,
+        fontSize: 0,
+        index
+      });
+    });
+
+    if (documentTitle) {
+      candidates.push({
+        text: documentTitle,
+        source: "document",
+        top: rootTop,
+        fontSize: 0
+      });
+    }
+
+    const scored = candidates.map((candidate) => {
+      let score = 0;
+      if (candidate.source === "heading") score += 40;
+      if (candidate.source === "document") score += 35;
+      if (candidate.source === "text") score += 20 - (candidate.index || 0);
+      if (documentTitle && (sameTitle(candidate.text, documentTitle) || documentTitle.includes(candidate.text) || candidate.text.includes(documentTitle))) score += 35;
+      if (candidate.fontSize >= 24) score += 20;
+      if (candidate.fontSize >= 18) score += 10;
+      if (candidate.text.length >= 8 && candidate.text.length <= 90) score += 10;
+      if (candidate.top - rootTop < 420) score += 10;
+      return { ...candidate, score };
+    });
+
+    scored.sort((a, b) => (b.score - a.score) || (a.top - b.top) || (a.text.length - b.text.length));
+    return scored[0]?.text || documentTitle || normalizeTitleText(textBlocks[0]?.text || "") || "X Article";
   }
 
   function getArticleTextBlocks(root) {
@@ -283,10 +370,10 @@
     if (!hasArticleHeader || textBlocks.length < 1) return null;
 
     const title = getArticleTitle(root, textBlocks);
-    const titleIndex = textBlocks.findIndex((block) => block.text === title);
+    const titleIndex = textBlocks.findIndex((block) => sameTitle(block.text, title));
     const contentBlocks = textBlocks
       .filter((block, index) => index !== titleIndex)
-      .filter((block) => block.text !== title)
+      .filter((block) => !sameTitle(block.text, title))
       .filter((block) => !/^[-•]\s*原文链接/.test(block.text));
 
     const blocks = [...contentBlocks, ...images]

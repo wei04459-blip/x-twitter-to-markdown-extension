@@ -5,9 +5,85 @@ const refreshBtn = document.querySelector("#refresh");
 const copyBtn = document.querySelector("#copy");
 const downloadMdBtn = document.querySelector("#downloadMd");
 const downloadBtn = document.querySelector("#download");
+const chooseDownloadDirBtn = document.querySelector("#chooseDownloadDir");
+const downloadDirNameEl = document.querySelector("#downloadDirName");
+const DIRECTORY_DB_NAME = "xtm-settings";
+const DIRECTORY_STORE_NAME = "settings";
+const DIRECTORY_HANDLE_KEY = "download-directory-handle";
+
+let downloadDirectoryHandle = null;
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function setDirectoryName(name) {
+  downloadDirNameEl.textContent = name || "未选择，使用浏览器默认下载目录";
+}
+
+function openSettingsDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DIRECTORY_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(DIRECTORY_STORE_NAME);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readStoredDirectoryHandle() {
+  const db = await openSettingsDb();
+  return new Promise((resolve, reject) => {
+    const request = db
+      .transaction(DIRECTORY_STORE_NAME, "readonly")
+      .objectStore(DIRECTORY_STORE_NAME)
+      .get(DIRECTORY_HANDLE_KEY);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeDirectoryHandle(handle) {
+  const db = await openSettingsDb();
+  return new Promise((resolve, reject) => {
+    const request = db
+      .transaction(DIRECTORY_STORE_NAME, "readwrite")
+      .objectStore(DIRECTORY_STORE_NAME)
+      .put(handle, DIRECTORY_HANDLE_KEY);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function hasDirectoryWritePermission(handle) {
+  if (!handle) return false;
+  const options = { mode: "readwrite" };
+  if ((await handle.queryPermission(options)) === "granted") return true;
+  return (await handle.requestPermission(options)) === "granted";
+}
+
+async function loadDownloadDir() {
+  try {
+    downloadDirectoryHandle = await readStoredDirectoryHandle();
+    setDirectoryName(downloadDirectoryHandle?.name || "");
+  } catch {
+    downloadDirectoryHandle = null;
+    setDirectoryName("");
+  }
+}
+
+async function chooseDownloadDir() {
+  if (!window.showDirectoryPicker) {
+    setStatus("当前浏览器不支持选择目录，将使用默认下载目录。");
+    return;
+  }
+
+  const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+  downloadDirectoryHandle = handle;
+  await storeDirectoryHandle(handle);
+  setDirectoryName(handle.name);
+  setStatus(`已选择下载目录：${handle.name}`);
 }
 
 function formatDate(value) {
@@ -29,6 +105,8 @@ function slugify(value) {
 
 function safeFileName(value, fallback = "x-article") {
   const name = String(value || fallback)
+    .replace(/^.+?\s+on\s+X\s*:\s*["“]?(.+?)["”]?\s*$/i, "$1")
+    .replace(/\s*(?:\/|\||-)\s*(?:X|Twitter)\s*$/i, "")
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -41,6 +119,7 @@ function looksLikeUiTitle(value) {
   const text = String(value || "").trim();
   return !text ||
     ["对话", "文章", "主页", "搜索", "通知", "更多", "个人资料", "X", "Twitter"].includes(text) ||
+    ["Conversation", "Articles", "Article", "Home", "Search", "Notifications", "More", "Profile"].includes(text) ||
     /^@\w+$/.test(text) ||
     /^https?:\/\//i.test(text);
 }
@@ -96,6 +175,50 @@ function articleImageFileName(article, imageIndex, src) {
   return `images/${sourceId}-image-${imageIndex + 1}.${getImageExtension(src)}`;
 }
 
+function resolveImageSrc(src, fallbackLocalPath, options = {}) {
+  return options.embeddedImages?.[src] ||
+    options.localImagePaths?.[src] ||
+    (options.localImages ? fallbackLocalPath : src);
+}
+
+function buildImageJobs(payload) {
+  const jobs = [];
+  const usedNames = new Set();
+  const seenUrls = new Set();
+  const baseName = slugify(exportBaseName(payload));
+
+  function add(src, suggestedName) {
+    if (!src || seenUrls.has(src)) return;
+    seenUrls.add(src);
+
+    const ext = getImageExtension(src);
+    const rawName = suggestedName || `${baseName}-image-${jobs.length + 1}`;
+    let name = `images/${slugify(rawName)}.${ext}`;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = `images/${slugify(rawName)}-${suffix}.${ext}`;
+      suffix += 1;
+    }
+    usedNames.add(name);
+    jobs.push({ src, name });
+  }
+
+  if (payload.article) {
+    (payload.article.images || []).forEach((src, index) => {
+      add(src, `${baseName}-${String(index + 1).padStart(2, "0")}`);
+    });
+  }
+
+  (payload.tweets || []).forEach((tweet) => {
+    (tweet.images || []).forEach((src, index) => {
+      const id = tweet.id || `tweet-${tweet.index || jobs.length + 1}`;
+      add(src, `${id}-${String(index + 1).padStart(2, "0")}`);
+    });
+  });
+
+  return jobs;
+}
+
 function markdownForTweet(tweet, position, total, options = {}) {
   const author = tweet.author || {};
   const titleBits = [];
@@ -118,7 +241,7 @@ function markdownForTweet(tweet, position, total, options = {}) {
   if (tweet.images?.length) {
     lines.push("配图：");
     tweet.images.forEach((src, index) => {
-      const imageSrc = options.embeddedImages?.[src] || (options.localImages ? imageFileName(tweet, index, src) : src);
+      const imageSrc = resolveImageSrc(src, imageFileName(tweet, index, src), options);
       lines.push(`![${author.handle || "tweet"} image ${index + 1}](${imageSrc})`);
     });
     if (options.includeImageUrls !== false) {
@@ -160,8 +283,7 @@ function markdownForArticle(article, options = {}) {
 
     if (block.type === "image") {
       const originalSrc = block.src;
-      const imageSrc = options.embeddedImages?.[originalSrc] ||
-        (options.localImages ? articleImageFileName(article, imageIndex, originalSrc) : originalSrc);
+      const imageSrc = resolveImageSrc(originalSrc, articleImageFileName(article, imageIndex, originalSrc), options);
       lines.push(`![${block.alt || "article image"}](${imageSrc})`);
       lines.push("");
       imageIndex += 1;
@@ -269,6 +391,7 @@ async function fetchImageAsDataUrl(src) {
 async function buildEmbeddedMarkdown(payload) {
   const embeddedImages = {};
   const imageUrls = [];
+  let failedCount = 0;
 
   if (payload.article) {
     (payload.article.images || []).forEach((src) => {
@@ -285,7 +408,15 @@ async function buildEmbeddedMarkdown(payload) {
   for (let index = 0; index < imageUrls.length; index += 1) {
     const src = imageUrls[index];
     setStatus(`正在嵌入配图 ${index + 1}/${imageUrls.length}...`);
-    embeddedImages[src] = await fetchImageAsDataUrl(src);
+    try {
+      embeddedImages[src] = await fetchImageAsDataUrl(src);
+    } catch {
+      failedCount += 1;
+    }
+  }
+
+  if (failedCount) {
+    setStatus(`${failedCount} 张配图嵌入失败，已保留原图链接。`);
   }
 
   return buildMarkdown(payload, {
@@ -360,6 +491,96 @@ function createZip(files) {
   ]);
 
   return new Blob([...localChunks, ...centralChunks, endRecord], { type: "application/zip" });
+}
+
+async function uniqueFileNameInDirectory(directoryHandle, fileName) {
+  const dotIndex = fileName.lastIndexOf(".");
+  const baseName = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+  const extension = dotIndex > 0 ? fileName.slice(dotIndex) : "";
+  let candidate = fileName;
+  let index = 2;
+
+  while (true) {
+    try {
+      await directoryHandle.getFileHandle(candidate);
+      candidate = `${baseName} (${index})${extension}`;
+      index += 1;
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+async function writeBlobToDirectory(blob, fileName) {
+  if (!downloadDirectoryHandle) return false;
+  if (!(await hasDirectoryWritePermission(downloadDirectoryHandle))) return false;
+
+  const targetName = await uniqueFileNameInDirectory(downloadDirectoryHandle, fileName);
+  const fileHandle = await downloadDirectoryHandle.getFileHandle(targetName, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+  return {
+    method: "directory",
+    fileName: targetName,
+    directoryName: downloadDirectoryHandle.name
+  };
+}
+
+async function downloadBlob(blob, fileName) {
+  try {
+    const directoryResult = await writeBlobToDirectory(blob, fileName);
+    if (directoryResult) return directoryResult;
+  } catch {
+    downloadDirectoryHandle = null;
+    setDirectoryName("");
+  }
+
+  const url = URL.createObjectURL(blob);
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download({
+      url,
+      filename: fileName,
+      conflictAction: "uniquify",
+      saveAs: false
+    }, (downloadId) => {
+      const error = chrome.runtime.lastError;
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve({
+        method: "downloads",
+        downloadId,
+        fileName
+      });
+    });
+  });
+}
+
+function notifyDownloadComplete(result) {
+  const title = "X/Twitter to Markdown";
+  const message = result.method === "directory"
+    ? `已保存到 ${result.directoryName}：${result.fileName}`
+    : `已开始下载：${result.fileName}`;
+
+  setStatus(message);
+
+  chrome.action?.setBadgeBackgroundColor?.({ color: "#246a73" });
+  chrome.action?.setBadgeText?.({ text: "OK" });
+  setTimeout(() => chrome.action?.setBadgeText?.({ text: "" }), 4000);
+
+  if (!chrome.notifications?.create) return;
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icon.svg",
+    title,
+    message
+  }, () => {
+    // Ignore notification failures, for example if no icon is packaged.
+    void chrome.runtime.lastError;
+  });
 }
 
 async function getActiveTab() {
@@ -451,15 +672,8 @@ async function downloadEmbeddedMarkdown() {
     const markdown = await buildEmbeddedMarkdown(lastPayload);
     outputEl.value = markdown;
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${exportBaseName(lastPayload)}.md`;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-    setStatus("已开始下载完整 Markdown 文件。");
+    const result = await downloadBlob(blob, `${exportBaseName(lastPayload)}.md`);
+    notifyDownloadComplete(result);
   } finally {
     downloadMdBtn.disabled = false;
     copyBtn.disabled = false;
@@ -474,60 +688,72 @@ async function downloadOfflinePackage() {
 
   const payload = lastPayload;
   const files = [];
-  const imageJobs = [];
-
-  if (payload.article) {
-    (payload.article.images || []).forEach((src, index) => {
-      imageJobs.push({ src, name: articleImageFileName(payload.article, index, src) });
-    });
-  }
-
-  (payload.tweets || []).forEach((tweet) => {
-    (tweet.images || []).forEach((src, index) => {
-      imageJobs.push({ src, name: imageFileName(tweet, index, src) });
-    });
-  });
+  const imageJobs = buildImageJobs(payload);
+  const localImagePaths = {};
+  const failedImages = [];
 
   setStatus(`正在下载 ${imageJobs.length} 张配图...`);
   downloadBtn.disabled = true;
 
   for (let index = 0; index < imageJobs.length; index += 1) {
     const job = imageJobs[index];
-    const response = await fetch(job.src, { credentials: "omit" });
-    if (!response.ok) {
-      throw new Error(`图片下载失败：${job.src}`);
-    }
-    const data = new Uint8Array(await response.arrayBuffer());
-    files.push({ name: job.name, data });
     setStatus(`正在下载配图 ${index + 1}/${imageJobs.length}...`);
+
+    try {
+      const response = await fetch(job.src, { credentials: "omit" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = new Uint8Array(await response.arrayBuffer());
+      files.push({ name: job.name, data });
+      localImagePaths[job.src] = job.name;
+    } catch (error) {
+      failedImages.push({ src: job.src, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   const offlineMarkdown = buildMarkdown(payload, {
-    localImages: true,
-    includeImageUrls: false
+    localImagePaths,
+    includeImageUrls: failedImages.length > 0
   });
 
   files.unshift({ name: "index.md", data: offlineMarkdown });
   files.push({
     name: "README.txt",
-    data: "解压这个 zip 后，用支持 Markdown 预览的软件打开 index.md。图片已保存在 images 文件夹，断网后仍可查看。\n"
+    data: [
+      "Open index.md after extracting this zip. Successfully downloaded images are stored in images/ and referenced locally.",
+      "If any image could not be downloaded, index.md keeps its original remote URL so the Markdown still works online.",
+      "",
+      `Downloaded images: ${Object.keys(localImagePaths).length}`,
+      `Failed images: ${failedImages.length}`,
+      ""
+    ].join("\n")
   });
 
+  if (failedImages.length) {
+    files.push({
+      name: "failed-images.txt",
+      data: failedImages.map((item) => `${item.src}\n${item.error}`).join("\n\n") + "\n"
+    });
+  }
+
   const blob = createZip(files);
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `${exportBaseName(payload)}-离线包.zip`;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-  setStatus("已开始下载离线 zip 包。");
+  const result = await downloadBlob(blob, `${exportBaseName(payload)}-offline.zip`);
+  notifyDownloadComplete(result);
+  if (failedImages.length) {
+    setStatus(`${result.method === "directory" ? "已保存" : "已开始下载"}，${failedImages.length} 张配图保留原链接。`);
+  }
   downloadBtn.disabled = false;
 }
 
 refreshBtn.addEventListener("click", exportTweets);
 copyBtn.addEventListener("click", copyMarkdown);
+chooseDownloadDirBtn.addEventListener("click", () => {
+  chooseDownloadDir().catch((error) => {
+    if (error?.name === "AbortError") return;
+    setStatus(error instanceof Error ? error.message : String(error));
+  });
+});
 downloadMdBtn.addEventListener("click", () => {
   downloadEmbeddedMarkdown().catch((error) => {
     setStatus(error instanceof Error ? error.message : String(error));
@@ -547,4 +773,5 @@ modeEl.addEventListener("change", exportTweets);
 copyBtn.disabled = true;
 downloadMdBtn.disabled = true;
 downloadBtn.disabled = true;
+loadDownloadDir();
 exportTweets();
